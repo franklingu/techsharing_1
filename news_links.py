@@ -32,6 +32,7 @@ def get_news_home_links(retry=3, sleep=30):
             parsed = etree.fromstring(res.content, html_parser)
             for link_elem in selector(parsed):
                 yield urllib.parse.urljoin(root_url, link_elem.get('href'))
+            break
         except Exception:
             if retry_num >= retry - 1:
                 raise
