@@ -6,11 +6,11 @@ import multiprocessing
 import queue
 import time
 import random
+from concurrent.futures import ThreadPoolExecutor, as_completed
+import asyncio
 
 import requests
 import gevent
-from lxml import etree
-from lxml.cssselect import CSSSelector
 
 
 class NewsDownloader(object):
@@ -75,7 +75,7 @@ class ThreadDownloader(NewsDownloader):
         for link in links:
             task_queue.put(link)
         for idx in range(self.num_threads):
-            worker = multiprocessing.Process(
+            worker = threading.Thread(
                 target=self._download_worker, args=(task_queue, result_queue)
             )
             worker.start()
@@ -113,7 +113,7 @@ class ProcessDownloader(NewsDownloader):
         for link in links:
             task_queue.put(link)
         for idx in range(self.num_threads):
-            worker = threading.Thread(
+            worker = multiprocessing.Process(
                 target=self._download_worker, args=(task_queue, result_queue)
             )
             worker.start()
@@ -141,25 +141,90 @@ class ConcurrentDownloader(NewsDownloader):
     """docstring for ConcurrentDownloader"""
     def __init__(self, *arg, **kwargs):
         super(ConcurrentDownloader, self).__init__()
-        self.arg = arg
+        self.num_workers = 4
+        if 'num_workers' in kwargs:
+            self.num_workers = kwargs['num_workers']
 
-
-class HybridDownloader(NewsDownloader):
-    """docstring for HybridDownloader"""
-    def __init__(self, *arg, **kwargs):
-        super(HybridDownloader, self).__init__()
-        self.arg = arg
+    def download_news(self, links):
+        with ThreadPoolExecutor(max_workers=self.num_workers) as executor:
+            fs_map = {
+                link: executor.submit(
+                    self._send_news_request, link)
+                for link in links
+            }
+            as_completed(fs_map.values())
+            return {link: ft.result() for link, ft in fs_map.items()}
 
 
 class GeventDownloader(NewsDownloader):
     """docstring for GeventDownloader"""
     def __init__(self, *arg, **kwargs):
         super(GeventDownloader, self).__init__()
-        self.arg = arg
+        self.num_workers = 4
+        if 'num_workers' in kwargs:
+            self.num_workers = kwargs['num_workers']
+        gevent.monkey.patch_all(thread=False, select=False)
+
+    def download_news(self, links):
+        raise NotImplemented
+        worker_pool = gevent.pool.Pool(self.num_workers)
+        jobs = [self._download_worker(worker_pool, link) for link in links]
+        gevent.joinall(jobs)
+
+    def _download_worker(self, pool, link):
+        return pool.spawn(self._send_news_request, link=link)
 
 
 class AsyncIODownloader(NewsDownloader):
     """docstring for AsyncIODownloader"""
     def __init__(self, *arg, **kwargs):
         super(AsyncIODownloader, self).__init__()
-        self.arg = arg
+
+    async def download_news(self, links):
+        self._ret = {}
+        loop = asyncio.get_event_loop()
+        ret_map = {}
+        for link in links:
+            future = loop.run_in_executor(None, self._send_news_request, link)
+            ret_map[link] = future
+        for ft in ret_map.values():
+            await ft
+        for link, ft in ret_map.items():
+            self._ret[link] = ft.result()
+
+    def retrive_result(self):
+        return self._ret
+
+
+if __name__ == '__main__':
+    links = [
+        'http://www.google.com',
+        'http://stackoverflow.com/questions/22190403/how-could-i-use-requests-in-asyncio',
+        'https://docs.python.org/3/library/concurrent.futures.html',
+        'http://docs.bonobo-project.org/en/0.2/tutorial/tut01.html',
+        'http://basic.10jqka.com.cn/000738/company.html',
+        'https://github.com/codelucas/newspaper/blob/master/newspaper/article.py',
+        'https://github.com/codelucas/newspaper/blob/master/newspaper/article.py',
+        'https://github.com/codelucas/newspaper',
+    ]
+    start = time.time()
+    loop = asyncio.get_event_loop()
+    async_worker = AsyncIODownloader()
+    loop.run_until_complete(async_worker.download_news(links))
+    end = time.time()
+    print('Asyncio:', end - start, len(async_worker.retrive_result()))
+    start = time.time()
+    sq_worker = SequentialDownloader()
+    ret = sq_worker.download_news(links)
+    end = time.time()
+    print('Sequential:', end - start, len(ret))
+    start = time.time()
+    thread_worker = ThreadDownloader()
+    ret = thread_worker.download_news(links)
+    end = time.time()
+    print('Thread:', end - start, len(ret))
+    start = time.time()
+    cc_worker = ConcurrentDownloader()
+    ret = cc_worker.download_news(links)
+    end = time.time()
+    print('Concurrent:', end - start, len(ret))
